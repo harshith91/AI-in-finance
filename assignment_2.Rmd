@@ -1,0 +1,566 @@
+---
+title: "Assignment 2"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r}
+# Please load libraries here
+library(tidyverse)
+t <- read.csv("trump_twitter.csv", stringsAsFactors = FALSE) %>%
+        as_tibble
+library(ggplot2)  # plotting
+library(caret)  # confusion matrix and cross-validation
+library(randomForest)  # decision tree fitting
+library(tm)  # text processing
+library(wordcloud) # text visualization
+library(reshape2)  # data manipulation, in particular, melt
+library(tidyverse)
+library(text2vec)
+library(keras)
+library(dplyr)
+library(glmnet)
+
+```
+
+
+# Data exploration and clearning
+
+Now we are going to filter out the tweets whose length is above 280
+```{r}
+t$nchar <- nchar(t$text)
+t<-t[t$nchar<280, ]
+dim(t)[1]
+```
+```{r}
+table(t$is_retweet)
+```
+
+We dont wanna keep the tweets that are just retweeted by Donald so we would remove them(also they form a very small fraction of total tweets)
+
+```{r}
+t <- t[t$is_retweet=="false", ]
+nrow(t)
+```
+
+now we are just gonna retain the columns of our interest
+```{r}
+t$created_at <- substring(t$created_at, 7, 10) #keeping only the year, Will be used for our plot
+
+t <- t %>% as_tibble %>% select(c(created_at, text, retweet_count, favorite_count)) 
+
+t$favorite_count <- as.numeric(t$favorite_count)
+```
+
+# cleaning the text
+
+```{r}
+t$clean_text <- t$text %>% tolower %>% {gsub('[^a-z]', ' ', .)}
+```
+
+# We are gonna solve it is a classification problem. keeping the MEAN number of retweet counts as the threshold, any number above will be classified as "viral" and below it as "nonviral"
+
+```{r}
+t$label <- ifelse(t$retweet_count>mean(t$retweet_count), "viral", "nonviral")
+
+t$label <- as.integer((t$label=="viral")+0)#changing the tag "viral"/"nonviral" to integers 0/1
+
+table(t$label)
+```
+
+# PLOT
+```{r}
+
+temp <- t %>% group_by(., created_at) %>%
+  summarize(viral = sum(label==1), nonviral = sum(label==0))
+
+
+ggplot(temp, aes(created_at, y = value, color = variable)) + 
+    geom_bar(aes(y = viral, col = "viral"), stat = "identity") + 
+    geom_bar(aes(y = nonviral, col = "nonviral"), stat = "identity") + theme(axis.text.x = element_text(angle = 45)) +
+  xlab('Year') + ylab('Viral/Nonviral Number of Tweets')
+```
+
+
+#word cloud
+
+```{r}
+visualize_text <- function(x) {
+  # x is a character vector
+  # the function will extract
+  frequent_words <- termFreq(x)
+  frequent_words <- frequent_words[!(names(frequent_words) %in% stopwords())]
+  wordcloud(words = names(frequent_words), 
+            freq = frequent_words, min.freq = 0,
+            max.words = 50, random.order=FALSE, rot.per=0.35, 
+            colors=brewer.pal(8, "Dark2"))
+
+}
+
+visualize_text(t$clean_text)
+```
+Plotting word clouds seperately for "viral" and "nonviral" tweets
+#For viral
+```{r}
+visualize_text(t$clean_text[t$label==1])
+```
+
+#For "nonviral"
+```{r}
+visualize_text(t$clean_text[t$label==0])
+```
+
+
+# Language modelling / feature engineering
+
+#Identify the response variable and the predictors here.
+
+
+```{r}
+word_vec_dim <- 200
+gram_window_size <- 5
+
+tokens <- space_tokenizer(t$clean_text)
+it = itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it) %>% prune_vocabulary(5)
+
+vectorizer <- vocab_vectorizer(vocab)
+
+tcm <-create_tcm(it, vectorizer,
+                 skip_grams_window = gram_window_size)
+
+dim(tcm)
+
+```
+
+```{r}
+glove = GlobalVectors$new(word_vectors_size = word_vec_dim, 
+                          vocabulary = vocab, x_max = 10)
+wv_main = glove$fit_transform(tcm, n_iter = 5, convergence_tol = 0.01)
+```
+
+```{r}
+wv_context = glove$components
+word_vectors = wv_main + t(wv_context)
+dim(word_vectors)
+```
+# Continuous bag of words
+
+```{r}
+dtm <- create_dtm(it, vectorizer)
+all_data <- as.matrix(dtm %*% word_vectors)
+dim(all_data)
+
+```
+
+
+
+# Modelling 
+
+#Construct 2 models to predict the log-retweet-count or whether a tweet goes viral from the text of a tweet, evaluate and compare their error or accuracy.
+
+
+# Integrating GloVe with logistic regression
+
+## Training and test sets
+
+
+
+```{r}
+set.seed(42)
+ind <- runif(nrow(t)) < 0.8
+
+cat("Training observations: ", head(which(ind), n = 10), "...\n")
+cat("Test observations: ", head(which(!ind), n = 10), "\n")
+```
+
+# Preparing data for decision tree
+
+```{r}
+#converting it into dataframe to be used in logistic regression
+data_log <- all_data %>%
+  as_tibble %>% mutate(label = as.factor(t$label))
+
+log_train <- data_log[ind , ]
+log_test <- data_log[!ind , ]
+
+
+```
+#Training Logistic regression
+
+```{r}
+
+mod_log <- glm(label ~ ., family = "binomial",
+               data = log_train)
+
+pred_log <- predict(mod_log, log_test, type = "response")
+pred_log <- (pred_log>=0.5) + 0
+
+```
+
+```{r}
+# Confusion matrix
+confusionMatrix(as.factor(log_test$label), as.factor(pred_log))
+
+```
+# Using regularized(lasso) logistic regression to address overfitting
+```{r}
+# Find the best lambda using cross-validation
+set.seed(123) 
+cv.lasso <- cv.glmnet(all_data[ind, ], log_train$label, alpha = 1, family = "binomial")
+
+
+```
+
+
+# Fit the final model on the training data
+```{r}
+
+model <- glmnet(all_data[ind, ], log_train$label, alpha = 1, family = "binomial",
+                lambda = cv.lasso$lambda.min)
+```
+
+# New confusion matrix
+
+```{r}
+lass_pred <- predict(model, all_data[!ind, ])
+lass_pred <- (lass_pred>=0.5) + 0
+confusionMatrix(as.factor(log_test$label), as.factor(lass_pred))
+```
+## Thus after regularized we have reduced overfitting as evident by increased specificity, although sensitivity has suffered a bit.
+
+
+
+#Preparing data for Neural network
+
+```{r}
+set.seed(40)
+
+ind<-runif(nrow(t))<0.7
+
+cat("training observations", head(which(ind), n=10),"\n")
+cat("test observations", head(which(!ind), n=10))
+
+
+```
+
+
+```{r}
+x_train <- all_data[ind, , drop=FALSE]
+x_test <- all_data[!ind, ,drop=FALSE]
+y_train <- as.matrix(t$label)[ind, , drop=FALSE]
+y_test <- as.matrix(t$label)[!ind, , drop=FALSE]
+
+cat("X train dimensions = ", dim(x_train), "\n")
+cat("Y train dimensions = ", dim(y_train), "\n")
+cat("X test dimensions = ", dim(x_test), "\n")
+cat("Y test dimensions = ", dim(y_test), "\n")
+
+```
+
+#Neural Net model
+
+# First we fit a simple neural network
+```{r}
+set.seed(2000)
+
+input <- layer_input(shape = c(ncol(x_train)))
+
+preds <- input %>%
+         layer_dense(units = 128, activation = "relu") %>%
+         layer_dense(units = 64, activation = "relu") %>%
+         layer_dense(units = 32, activation = "relu") %>%
+         layer_dense(units = 1, activation = "sigmoid")
+
+mod_nn_1 <- keras_model(input, preds)
+
+mod_nn_1 %>% compile(
+  optimizer = "rmsprop",
+  loss = "binary_crossentropy",
+  metrics = c("acc")
+)
+
+
+```
+
+
+# Training a Neural Net
+```{r}
+history1 <- mod_nn_1 %>% fit(
+  x_train,
+  y_train,
+  epochs = 10,
+  batch_size = 32,
+  validation_data = list(x_test, y_test)
+)
+
+```
+
+```{r}
+plot(history1)
+```
+#Creating a confusion matrix
+
+```{r}
+prediction <- mod_nn_1 %>% predict(x_test)
+prediction <- 0 + (prediction >= 0.5)
+confusionMatrix(as.factor(y_test), as.factor(prediction))
+```
+
+#Improving the model by regularizing to remove overfitting
+
+```{r}
+set.seed(2000)
+
+input <- layer_input(shape = c(ncol(x_train)))
+
+preds <- input %>%
+         layer_dense(units = 128, activation = "relu", 
+                     kernel_regularizer = regularizer_l1(0.01)) %>%
+         layer_dense(units = 64, activation = "relu",
+                     kernel_regularizer = regularizer_l1(0.01)) %>%
+         layer_dense(units = 32, activation = "relu",
+                     kernel_regularizer = regularizer_l1(0.01)) %>%
+         layer_dense(units = 1, activation = "sigmoid")
+
+mod_nn_2 <- keras_model(input, preds)
+
+mod_nn_2 %>% compile(
+  optimizer = "rmsprop",
+  loss = "binary_crossentropy",
+  metrics = c("acc")
+)
+
+
+```
+
+```{r}
+history2 <- mod_nn_2 %>% fit(
+                x_train,
+                y_train,
+                epochs = 50,
+                batch_size = 32,
+                validation_data = list(x_test, y_test)
+)
+```
+
+```{r}
+plot(history2)
+```
+# We can see that the difference between training and validation accuracy has decreased after regularization
+
+#Confusion matrix for second neural network
+
+```{r}
+prediction2 <- predict(mod_nn_2, x_test)
+prediction2 <- 0 + (prediction2 >= 0.5)
+confusionMatrix(as.factor(y_test), as.factor(prediction2))
+```
+# LSTM Model
+#Now we create a LSTM model
+```{r}
+max_unique_word <- 2368
+max_report_len <- 60
+
+tokenizer <- text_tokenizer(num_words = max_unique_word,
+  filters = "!\"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n",
+  lower = TRUE, split = " ", char_level = FALSE, oov_token = NULL) %>%
+  fit_text_tokenizer(t$clean_text)
+
+sequences <- texts_to_sequences(tokenizer, t$clean_text) %>%
+  pad_sequences(max_report_len)
+
+cat("The first report is\n", t$clean_text[1], "\n\n")
+cat("The first report encoded is\n", sequences[1 , ], "\n")
+```
+
+# Training and Test data set
+```{r}
+set.seed(2020)
+
+ind <- runif(nrow(t)) <= 0.8
+
+x_train <- sequences[ind, , drop=FALSE]
+y_train <- as.matrix(t$label)[ind, , drop=FALSE]
+x_test <- sequences[!ind, , drop=FALSE]
+y_test <- as.matrix(t$label)[!ind, , drop=FALSE]
+
+cat("X train dimensions = ", dim(x_train), "\n")
+cat("Y train dimensions = ", dim(y_train), "\n")
+cat("X test dimensions = ", dim(x_test), "\n")
+cat("Y test dimensions = ", dim(y_test), "\n")
+```
+
+#Training LSTM
+```{r}
+
+mod_lstm <- keras_model_sequential()
+
+mod_lstm %>% layer_embedding(input_dim = max_unique_word,
+                             output_dim = 128) %>%
+             layer_lstm(units = 64) %>%
+             layer_dense(units = 1, activation = "sigmoid")
+
+mod_lstm %>% compile(
+             loss = "binary_crossentropy",
+             optimizer = "adam",
+             metrics = c("accuracy")
+            )
+summary(mod_lstm)
+```
+```{r}
+
+lstm_history <- mod_lstm %>% fit(
+  x_train, y_train,
+  batch_size = 32,
+  epochs = 10,
+  validation_data = list(x_test, y_test)
+)
+```
+
+```{r}
+plot(lstm_history)
+```
+
+#confusion matrix
+```{r}
+pred_lstm <- predict_classes(mod_lstm, x_test)
+
+confusionMatrix(as.factor(y_test), as.factor(pred_lstm))
+```
+
+
+
+#Removing overfitting in LSTM
+```{r}
+
+set.seed(42)
+
+mod_lstm_2 <- keras_model_sequential()
+
+mod_lstm_2 %>%
+  layer_embedding(input_dim = max_unique_word, output_dim = 128) %>% 
+  layer_lstm(units = 64, dropout = 0.1, recurrent_dropout = 0.2) %>% 
+  layer_dense(units = 1, activation = 'sigmoid')
+
+mod_lstm_2 %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = c('accuracy')
+)
+
+summary(mod_lstm_2)
+```
+
+```{r}
+lstm_history2 <- mod_lstm_2 %>% fit(
+  x_train, y_train,
+  batch_size = 32,
+  epochs = 10,
+  validation_data = list(x_test, y_test)
+)
+```
+
+
+```{r}
+plot(lstm_history2)
+```
+# We see the accuracy has increased and validation loss decreased in our Regularized LSTM
+
+```{r}
+pred_lstm2 <- predict_classes(mod_lstm_2, x_test)
+
+confusionMatrix(as.factor(y_test), as.factor(pred_lstm2))
+
+```
+# After regularization we notice a slight increase in specificity as well as sensitivity
+
+
+
+# CONCLUSION :
+#Out of all the three models that we fit Regularized LSTM gives the highest accuracy of 0.8801.
+Sensitivity : 0.9173          
+Specificity : 0.7865 
+
+#accuracy for lasso regularized logistic regression:0.817 
+Sensitivity : 0.8172         
+Specificity : 0.8162
+
+
+
+
+
+# Non-math part
+
+Suggest a way how twitter data such as Donald Trump's twitter can be used to solve a real business or finance problem. Evaluate the cost of collecting the data for a real purpose. You can just re-use this part from assignment 1 or build on top of that.
+
+
+#ANSWER:
+Twitter data can be used for various purpose in business/Social settings. One such example is of the study
+to analyse the concept of qualit in healthcare.
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5938572/ #
+The aim of this study was to collect twitter data to understand the concept of workplace compassion.
+Results
+A total of 260 tweets were analyzed. Of the 251 statements within the tweets that were coded, 
+37.8% (95/251) - Leadership and Management aspects of workplace compassion 
+29.5% (74/251) - Values and Culture
+17.5% (44/251) - Personalized Policies and Procedures that support workplace compassion
+15.2% (38/251) - Activities and Actions that show workplace compassion.
+Content analysis showed that small acts of kindness, an embedded organizational culture of caring for one another, and recognition of the emotional and physical impact of healthcare work were the most frequently mentioned characteristics of workplace compassion in healthcare.
+
+#COST of collecting data - 
+The pricing for the premium APIs ranges from $149/month to $2,499/month, based on the level of access needed. 
+
+
+
+
+
+# Optional open-ended part
+
+# Multi layered RNN
+# We will use the same data that was used for or LSTM model
+
+```{r}
+mod_rnn <- keras_model_sequential()
+
+mod_rnn %>% layer_embedding(input_dim = max_unique_word,
+                            output_dim = 128) %>%
+            layer_simple_rnn(units = 64, dropout = 0.2, recurrent_dropout = 0.2, 
+                             return_sequences = TRUE)%>%
+            layer_simple_rnn(units = 64, dropout = 0.2, recurrent_dropout = 0.2)%>%
+            layer_dense(units = 1, activation = "sigmoid")
+
+mod_rnn %>% compile(
+            loss = "binary_crossentropy",
+            optimizer = "adam",
+            metrics = c("accuracy")
+)
+
+```
+
+```{r}
+history_rnn <- mod_rnn %>%
+               fit(x_train, y_train,
+                   batch_size = 64,
+                   epochs = 20,
+                   validation_data = list(x_test, y_test))
+
+```
+
+```{r}
+plot(history_rnn)
+```
+
+
+#confusion matrix
+
+```{r}
+pred_rnn <- predict_classes(mod_rnn, x_test)
+confusionMatrix(as.factor(y_test), as.factor(pred_rnn))
+```
+# Multilayed RNN gives a lower value of specificity than our other regularized NN models. This shows that adding another layer 
+#possibly increases the overfitting in our model slightly. It would be a good idea to tweak regularization parameters around to get a better model with less overfitting.

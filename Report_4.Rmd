@@ -1,0 +1,621 @@
+---
+title: "Predicting S&P 500 Price Movements Using Economic News"
+author: "Team 2"
+date: "22 Feb 2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include = FALSE}
+# The following command prevents all the R codes 
+# from being included into the slides
+# Also, it makes R save output of each chunk on the disk and the next time the chunk is run, it loads results from the disk instead of calculating from scratch. This option saves a great deal of time when training neural networks is involved.
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# the following commants load R packages so that packages that are not in the system yet will be automatically downloaded and installed
+
+list.of.packages <- c("quantmod", "tidyverse", "tm", 
+                      "wordcloud", "text2vec", "keras", 
+                      "caret", "glmnet", "e1071", "vip",
+                      "pdp", "randomForest", "rpart.plot",
+                      "rpart", "tfruns", "knitr")
+
+new.packages <- list.of.packages[!(list.of.packages 
+                                   %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+lapply(list.of.packages, require, character.only = TRUE)
+```
+
+# Summary of Model Performance
+
+In this project, we are concerned with predicting the daily movement of the stock market (upward or downward) using the economic news reports on that day. The first table below summarizes the prediction accuracies of all the models we built on the test set plus the "No Information Rate", which is the accuracy of simply predicting every movement to be upward (or downward, depends on whichever is higher). According to the table, our models does not significantly outperform the naive baseline model.
+
+The second table gives a list of words that play an important role in determining the movement of the market as well as their respective impact ("+" means positive, "~" means neutral and "-" means negative).
+
+```{r}
+Model <- c("LSTM Model with GloVe", 
+           "GRU Model with GloVe",
+           "Logistic Regression with GloVe",
+           "SVM Model with GloVe",
+           "Logistic Regression without GloVe", 
+           "Decision Tree without GloVe",
+           "Random Forest without GloVe",
+           "No Information Rate")
+
+Accuracy <- c('52.03%','47.28%','52.38%','52.84%','52.38%','52.38%','50.64%','52.38%')
+ModelAcc <- data.frame(Model, Accuracy)
+
+kable(ModelAcc)
+```
+
+```{r}
+Words <- c("stock", "rate", "stocks", "new")
+`Gini Index` <- c(4.621305, 4.484455, 4.426521, 4.309248)
+Impact <- c("-", "-", "+", "~")
+
+ImportanceRank <- data.frame(Words, `Gini Index`, Impact)
+
+kable(ImportanceRank)
+```
+
+# Problem
+
+Economic news reports have always played a part in investors' minds when determining their portfolios. With the increasing ubiquity of data, fast supply of news and proliferation of machine learning techniques, many are looking into using machine learning techniques to aid them in understanding the stock market such as in the case of stock price prediction.
+
+Successful stock price preduction will yield profit to many market participants. Investors will be able to profit from making accurate predictions. Companies will be able to gain insights into their own market outlook, investor's perception and be able to make better business decisions.
+
+In this project, we are exploring whether **analyzing economic news data will allow us to predict stock market movements.**
+
+We will be implementing a series of both deep and non-deep machine learning techniques and comparing their results.
+
+# Data
+
+The dataset we are using is a collection of economic news reports from the United States (see [1]). The year of the news articles ranges from 1969 to 2014.
+
+Additionally, we obtained S&P 500 index from Yahoo and the index movement (up or down from the previous day's adjusted price) as a proxy for the movement of the market. This will be used as our response variable and thus we are dealing with a classification problem. Since the news articles we obtained are from the United States, using S&P 500 index is very logical as it measures the stock performance of the 500 largest companies in the United States.
+
+We will specify our predictors in the modelling part as they differ in different model settings.
+
+## Data Cleaning & Preprocessing
+
+We ensured that the economic news reports are all from distinct dates and removed symbols from the text of the articles. 
+
+Next, we joined S&P index movements with our economic news data according to their dates.
+
+```{r cache = TRUE}
+# retrieve market data
+options("getSymbols.warning4.0"=FALSE)
+snp500 <- getSymbols("^GSPC", auto.assign = FALSE, from = as.Date("1951-01-01"), 
+                     to = as.Date("2014-12-31"))
+snp500_d1 <- snp500$GSPC.Adjusted[-nrow(snp500),] # get the price of the previous day
+snp500_d0 <- snp500$GSPC.Adjusted[-1,]            # get the price of the current day
+snp500_change <- data.frame(move = ifelse(as.numeric(snp500_d1) < as.numeric(snp500_d0), "up", "down"), 
+                            date = as.Date(rownames(as.data.frame(snp500_d0))))
+
+# data preprocessing
+all_data <- read.csv("Full-Economic-News-DFE-839861.csv") %>% 
+  as.tibble() %>% 
+  distinct(date, .keep_all = TRUE) %>% 
+  transmute(date = as.Date(date, "%m/%d/%y"), 
+            cleaned_text = tolower(gsub("[^[:alnum:][:blank:]?&/\\-]", "", text))) %>% 
+  right_join(snp500_change, by = "date") %>% 
+  arrange(date) %>% 
+  na.omit()
+
+cat("A sample of our data after preprocesing is shown below:")
+all_data[1:5,]
+```
+
+With that, we have **`r nrow(all_data)`** samples for use in our analysis.
+
+## Exploratory Data Analysis
+
+### Word Cloud
+
+We generated the word cloud as shown below: 
+
+```{r}
+# word cloud
+visualize_text <- function(x) {
+  # x is a character vector
+  # the function will extract
+  frequent_words <- termFreq(x)
+  frequent_words <- frequent_words[!(names(frequent_words) %in% 
+                                       c(stopwords(), "said","yesterday","can", 
+                                         "years", "quarter", "now", "will", 
+                                         "since", "also", "year"))]
+  wordcloud(words = names(frequent_words), 
+            freq = frequent_words, min.freq = 0,
+            max.words = 40, random.order = FALSE, rot.per = 0.35, 
+            colors = brewer.pal(8, "Dark2"),
+            scale = c(2, 0.25))
+}
+
+visualize_text(all_data$cleaned_text)
+```
+
+From the word cloud, some of the more important commonly used words include "market", "year" and "interest". These are all words that are heavily used in economic news and may determine the outlook of the markets.
+
+# Modelling
+
+The next part of our report is the application of various deep and non-deep machine learning models as well as the corresponding language modelling / feature engineering onto our dataset.
+
+## Deep Models
+
+### Language Modelling / Feature Engineering
+
+The response variable, as mentioned before, is whether the current day's index went up or down as compared to the previous day's adjusted price.
+
+The predictors used in deep models are the word sequences, and we split the full dataset into training set (60%), validation set (20%) and test set (20%). 
+
+```{r}
+# initialize hyper-parameters
+max_unique_word <- 2111
+max_report_len <- 60
+
+tokenizer <- text_tokenizer(num_words = max_unique_word,
+  filters = "!\"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n",
+  lower = TRUE, split = " ", char_level = FALSE, oov_token = NULL) %>%
+  fit_text_tokenizer(all_data$cleaned_text)
+
+# create predictors
+sequences <- texts_to_sequences(tokenizer, all_data$cleaned_text) %>%
+  pad_sequences(max_report_len)
+
+# encode the response variable
+y <- (all_data$move == 'up') + 0
+```
+
+```{r}
+# split the full dataset into training set (60%), validation set (20%) and test set (20%)
+set.seed(2019)
+ind <- runif(nrow(all_data))
+
+train_x <- sequences[ind <= 0.6, , drop = FALSE]
+train_y <- y[ind <= 0.6, drop = FALSE]
+validation_x <- sequences[ind > 0.6 & ind <= 0.8, , drop = FALSE]
+validation_y <- y[ind > 0.6 & ind <= 0.8 , drop = FALSE]
+test_x <- sequences[ind > 0.8 , , drop = FALSE]
+test_y <- y[ind > 0.8, drop = FALSE]
+
+cat("Dimensions of training data:", dim(cbind(train_x, train_y)), "\n")
+cat("Dimensions of validation data:", dim(cbind(validation_x, validation_y)), "\n")
+cat("Dimensions of test data:", dim(cbind(test_x, test_y)), "\n")
+```
+
+We have included GRU along with LSTM in our study of deep models for NLP used for market prediction. Salient differences between the two are as follows:
+
+1) LSTM has three gates (input, output and forget gate), while GRU has two gates (reset and update gate)
+
+2) The role of the Update gate in the GRU is very similar to the Input and Forget gates in the LSTM
+
+3) In LSTM the amount of new information added through the Input gate is completely independent of the information retained through the Forget gate. While in GRU the Update gate is responsible for determining which information from the previous memory to retain and is also responsible for controlling the new memory to be added, thus is **NOT** independent
+
+4) GRUs are faster to train as compared to LSTMs due to the fewer number of weights and parameters to update during training. This is because of the fewer number of gates in the GRU cell (two gates) as compared to the LSTM’s three gates.
+
+### Hyper-Parameter Tuning
+
+We have employed an explicit grid search on an independent validation set instead of the time-consuming cross-validation. We replaced the hyper-paramters we want to tune with a flag. In the control file we defined the range for these parameters.
+
+In the seperate "hyper_tune_lstm.R" and "hyper_tune_GRU.R" files we set the default values for the dropout rate, the recurrent droupout rate, the neuron amount for the two hidden layers and the learning rate. All these possible values of the hyperparameters we want to tune will produce a total 108 combinations (see the table below). Out of these 108 combinations, we randomly chose 10% of the combinations and selected the best combination out of them.
+
+Finally, we use the best combination of these hyperparamters for both LSTM and GRU. Note that we pre-defined the numbers of batch_size and epochs, as more iterations usually leads to better result.
+
+```{r}
+Hyper_Parameter <- c("Dropout rate", 
+           "Recurrent dropout rate",
+           "Number of neurons on the 1st hidden layer",
+           "Number of neurons on the 2nd hidden layer",
+           "Learning Rate")
+
+Value <- c("0.2, 0.4, 0.6",
+           "0.2, 0.4, 0.6", 
+           "128, 64", 
+           "64, 32",
+           "0.00001, 0.0001, 0.001")
+hyper_para_tune <- data.frame(Hyper_Parameter, Value)
+
+kable(hyper_para_tune)
+```
+
+### LSTM Model
+
+The hyper-parameters we chose for the LSTM model are as follows:
+
+```{r}
+Hyper_Parameter <- c("Dropout rate", 
+           "Recurrent dropout rate",
+           "Number of neurons on the 1st hidden layer",
+           "Number of neurons on the 2nd hidden layer",
+           "Learning Rate")
+
+Value <- c(0.4, 0.4, 64, 64, 0.00001)
+hyper_para_lstm <- data.frame(Hyper_Parameter, Value)
+
+kable(hyper_para_lstm)
+```
+
+The structure of the model is given below.
+
+```{r}
+# hyper-parameter initialization and tuning
+
+# initialize batch_size and epochs
+batch_size <- 32
+epochs <- 10
+
+# compile the model with the selected combination of hyper-parameters
+mod_lstm <- keras_model_sequential()
+mod_lstm %>% layer_embedding(input_dim = max_unique_word,
+                             output_dim = 128) %>%
+             layer_lstm(units = 64, 
+                        dropout = 0.4, 
+                        recurrent_dropout = 0.4,
+                        return_sequences = TRUE) %>%
+             layer_lstm(units = 64, 
+                        dropout = 0.4, 
+                        recurrent_dropout = 0.4) %>%
+             layer_dense(units = 1, activation = "sigmoid")
+mod_lstm %>% compile(loss = "binary_crossentropy",
+                     optimizer = optimizer_adam(lr = 0.00001),
+                     metrics = c("accuracy"))
+summary(mod_lstm)
+```
+
+```{r}
+# train the model on the training set and validation set
+lstm_history <- mod_lstm %>% fit(
+  rbind(train_x, validation_x),
+  c(train_y, validation_y),
+  batch_size = batch_size,
+  epochs = epochs,
+  validation_data = list(test_x, test_y),
+  verbose = 0
+)
+```
+
+The plot below illustrates the training process.
+
+```{r}
+plot(lstm_history)
+```
+
+The prediction accuracy of the LSTM model on the test set is 52.03%.
+
+```{r}
+# model performance on test set
+perform_lstm <- confusionMatrix(
+  as.factor(ifelse(predict(mod_lstm, test_x) > 0.5, 'up', 'down')), 
+  as.factor(ifelse(test_y == 1, 'up', 'down'))) # model performance
+```
+
+### GRU Model
+
+The hyper-parameters we chose for the GRU model are as follows:
+
+```{r}
+Hyper_Parameter <- c("Dropout rate", 
+           "Recurrent dropout rate",
+           "Number of neurons on the 1st hidden layer",
+           "Number of neurons on the 2nd hidden layer",
+           "Learning Rate")
+
+Value <- c(0.4, 0.2, 64, 64, 0.00001)
+hyper_para_gru <- data.frame(Hyper_Parameter, Value)
+
+kable(hyper_para_gru)
+```
+
+The structure of the model is given below.
+
+```{r}
+# compile the model with the selected combination of hyper-parameters
+mod_gru <- keras_model_sequential()
+mod_gru %>% layer_embedding(input_dim = max_unique_word,
+                            output_dim = 128) %>%
+            layer_gru(units = 64, 
+                      dropout = 0.4, 
+                      recurrent_dropout = 0.2,
+                      return_sequences = TRUE,
+                      input_shape = list(NULL, dim(rbind(train_x, validation_x))[[-1]])) %>% 
+            layer_gru(units = 64, activation = "relu",
+                      dropout = 0.4,
+                      recurrent_dropout = 0.2) %>% 
+            layer_dense(units = 1, activation = "sigmoid")
+mod_gru %>% compile(loss = "binary_crossentropy",
+                    optimizer = optimizer_adam(lr = 0.00001),
+                    metrics = c("accuracy"))
+summary(mod_gru)
+```
+
+```{r}
+# train the model on the training and validation set
+gru_history <- mod_gru %>% fit(
+  rbind(train_x, validation_x),
+  c(train_y, validation_y),
+  batch_size = batch_size,
+  epochs = epochs,
+  validation_data = list(test_x, test_y),
+  verbose = 0)
+```
+
+The plot below illustrates the training process.
+
+```{r}
+plot(gru_history)
+```
+
+The prediction accuracy of the GRU model on the test set is 47.28%.
+
+```{r}
+# model performance on test set
+perform_gru <- confusionMatrix(
+  as.factor(ifelse(predict(mod_gru, test_x) > 0.5, 'up', 'down')), 
+  as.factor(ifelse(test_y == 1, 'up', 'down')))
+```
+
+## Non-Deep Models
+
+### Models with GloVe
+
+#### GloVe
+
+We first train the GloVe model. And the specfications for training are given in the following table:
+
+```{r}
+Parameter <- c("Dimension of word vectors",
+               "Window size",
+               "Minimum term count",
+               "Convergence tolerance",
+               "Number of iterations")
+
+Value <- c(200, 5, 50, 0.01, 50)
+glove_para <- data.frame(Parameter, Value)
+
+kable(glove_para)
+```
+
+```{r}
+# initialize hyper-parameters
+word_vec_dim <- 200
+gram_window_size <- 5
+min_term_count <- 50
+
+# create vocabulary 
+tokens <- space_tokenizer(all_data$cleaned_text)
+it = itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it) %>% prune_vocabulary(min_term_count)
+
+# use our filtered vocabulary
+vectorizer <- vocab_vectorizer(vocab)
+
+# create the tcm
+tcm <-create_tcm(it, vectorizer,
+                 skip_grams_window = gram_window_size)
+cat("Dimension of the term-cooccurrence matrix:", dim(tcm), "\n")
+```
+
+```{r}
+# train the model
+glove <- GlobalVectors$new(word_vectors_size = word_vec_dim, 
+                          vocabulary = vocab, x_max = 10)
+output <- capture.output(wv_main <- glove$fit_transform(tcm, n_iter = 50, 
+                                                        convergence_tol = 0.01))
+```
+
+```{r}
+wv_context <- glove$components
+word_vectors <- wv_main + t(wv_context)
+cat("Dimension of word vector matrix:", dim(word_vectors))
+```
+
+#### Language Modelling / Feature Engineering
+
+```{r}
+#create a continous bag of words
+dtm <- create_dtm(it, vectorizer)
+full_data <- as.matrix(dtm %*% word_vectors)
+
+data_non_deep <- full_data %>%
+  as_tibble %>% 
+  mutate(move = as.factor(all_data$move))
+
+cat("Dimension of engineered input:", dim(data_non_deep))
+```
+
+```{r include = FALSE}
+# split the full dataset into training set (80%) and test set(20%)
+data_non_deep_train <- data_non_deep[ind <= 0.8, ]
+data_non_deep_test <- data_non_deep[ind > 0.8, ]
+```
+
+For non-deep models with GloVe, we simply sum up the word vectors generated for every record and take the sums as the input features. And this time, we radonmly choose 80% of the full dataset as the training set and the rest 20% as the test set, which have `r nrow(data_non_deep_train)` records and `r nrow(data_non_deep_test)` respectively.
+
+On the other hand, the response variable we use is the same as before, which is the movement of the stock market.
+
+#### Models with GloVe: Logistic Regression
+
+The first non-deep model with GloVe we used is the logistic regression. We first did it without regularization and obtained a accuracy of 52.03%. Then, we implemented L1-regularization using ten-fold cross-validation and reconstruct the model with the tuned lambda (see the graph below for the tuning process). The accuracy increased to 52.38% after regularization, yet it is still not satisfactory.
+
+```{r fig.width=2, fig.height=10, echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("logit_1.png")
+ grid.raster(img)
+```
+
+#### Models with GloVe: Support Vector Machines
+
+The other non-deep model with GloVe we employed is the Support Vector Machines (SVM). Generally speaking, they are supervised machine learning models which are largely used in classification and regression analysis. SVMs are able to complete both linear and non-linear classification, whereby non-linear classification is done through applying the kernel trick to maximum-margin hyperplanes. How SVM does this is simply by calculating the dot product between the vectors in the data set. This makes the calculations much simpler than removing the need to make calculations in higher dimensions. 
+
+The common types of kernels used in SVM include linear, polynomial, radial and sigmoid kernels. In our analysis, we will be using the radial kernel as it proves to be the best fit for our dataset. 
+
+Some of the advantages of SVM include it being able to work with unstructured data such as text, being effective even when working with high-dimensional data,  and also high versatility and memory efficiency.
+
+However, it also has its own disadvantages. SVM may lead to difficulty in understanding the final model as it is hard to visualise the separating hyperplane when there is a large number of dimensions. Hence, we are also unable to make tweaks to the model based on our own commercial knowledge. Additionally, it may be difficult to find a good kernel function for the data set.
+
+Overall, even with its downsides, SVM is still seen as a good general purpose algorithm, especially for small datasets, allowing for it's users to achieve considerable performance accuracy without the use of deep learning algorithms.
+
+The application of SVM to our dataset yield the following results:
+
+```{r}
+# SVM model
+model_svm <- svm(move ~ . , 
+           data =  data_non_deep_train)
+```
+
+```{r}
+# model performance on test set
+perform_svm <- confusionMatrix(predict(model_svm, data_non_deep_test), 
+                               data_non_deep_test$move)
+```
+
+As can be seen, SVM provides a test accuracy of 52.84%.
+
+### Models without GloVe
+
+#### Language Modelling / Feature Engineering
+
+So far, none of our models have yielded a prediction accuracy significantly higher than the No Information Rate given in the summary before, which is the accuracy of simply predicting every movement to be upward (or downward, depends on whichever is higher). Therefore, we now turn the focus of our project to finding relatively important words in the text that dictate the movement of the stock market. To this end, we implemented three models without GloVe.
+
+```{r}
+# text preprocessing
+corpus <- VCorpus(VectorSource(all_data$cleaned_text))
+DTM <- DocumentTermMatrix(corpus)
+cat("Dimensions of data before feature selection:", dim(DTM), "\n")
+
+# feature selection
+# eliminate stopwords and words typical of the tweets 
+# and only choose the words that appear more than 50 times
+tf <- termFreq(all_data$cleaned_text)
+tf <- tf[!(names(tf) %in% c(stopwords(), "said","yesterday","can", 
+                            "years", "quarter", "now", "will", 
+                            "since", "also", "year"))]
+tf <- tf[tf >= min_term_count]  
+DTM <- DTM[ , colnames(DTM) %in% names(tf)]
+
+# an extra bit of cleaning
+colnames(DTM)[colnames(DTM) == 'next'] <- 'NEXT'
+colnames(DTM)[colnames(DTM) == 'else'] <- 'ELSE'
+
+# identify predictors and response variable
+all_data <- cbind(as.data.frame(as.matrix(DTM)), 
+                  all_data$move)
+names(all_data)[ncol(all_data)] <- "y" # rename the response variable as "y"
+all_data <- na.omit(all_data)
+cat("Dimensions of data after feature selection:", dim(all_data), "\n")
+```
+
+```{r}
+# split the full dataset into training set (80%) and test set (20%)
+train_data <- all_data[ind <= 0.8, ]
+test_data <- all_data[ind > 0.8, ]
+cat("Dimensions of training data:", dim(train_data), "\n")
+cat("Dimensions of test data:", dim(test_data), "\n")
+```
+
+For non-models without GloVe, our predictors are the frequencies of words in news reports, which requires the construction of document-term matrix. Again, we split the full data set into training set (80%) and test set (20%) with the same random sequence that were generated before.
+
+#### Models without GloVe: Logistic Regression with Regularization
+
+The first model we used is the logistic regression with regularization. Below we show the process of the hyper-parameter tuning.
+
+```{r fig.width=2, fig.height=10, echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("logit_2.png")
+ grid.raster(img)
+```
+
+Again, this time we were left with one single variable after the L1-regularization, which is the frequency of the word "according". Obviously, this does not reveal much information. And the prediction accuracy on the test set is 52.38%.
+
+### Models without GloVe: Decision Tree (Pruned)
+
+The second model we used is the decision tree. Since we are left with only one node after pruning, the model not only has the same accuracy as the baseline model (52.38%), but also provides us with zero information regarding the words.
+
+### Models without GloVe: Random Forest with Regularization
+
+Luckily, the last model did the job. To begin with, according to the rule of thumb that the optimal number of variables to choose from for each node should be the square root of the total number of variables, which is $$\sqrt{1891} \approx 43 $$, we cross-validate the numbers between 41 and 45 to select the best hyper-parameter. As can be seen in the graph below, the optimal number of variables to choose from for each node is indeed 43.
+
+```{r fig.width=2, fig.height=10, echo=FALSE}
+library(png)
+library(grid)
+img <- readPNG("rf.png")
+ grid.raster(img)
+```
+
+```{r}
+# model performance on test set
+names(train_data) <- make.names(names(train_data))
+names(test_data) <- make.names(names(test_data))
+
+mod_rf <- randomForest(y ~ . ,
+                   data = train_data, 
+                   xtest = test_data[ , -ncol(test_data)],
+                   ytest = test_data[ , ncol(test_data)],
+                   keep.forest = TRUE,
+                   mtry = 43,
+                   ntree = 50)
+perform_rf <- confusionMatrix(predict(mod_rf, test_data, type = "class"), 
+                              test_data$y)
+```
+
+With the tuned hyper-parameter, we trained the model on the training set and tested it on the test set. Although this random forest we constructed does not produce a high accuracy as well (50.64%), it does show us the words that matter in determining the price movement, which is the exact focus of this part. In terms of Mean Decrease Gini Index, “stock”, “rate”, “stocks” and “new” are the four words that are most important. 
+
+```{r}
+# variable importance ranking
+as.data.frame(importance(mod_rf)) %>%
+   mutate(`predictor` = rownames(importance(mod_rf))) %>%
+   top_n(4, MeanDecreaseGini) %>%
+   arrange(desc(MeanDecreaseGini))
+
+vip(mod_rf, bar = FALSE, horizontal = FALSE, size = 1.5)
+```
+
+Further, to evaluate their respective impacts on the response variable, we utilize the partial dependence plots as shown below. According to them, except for the word "economic", the rest words all have a positive influence over the movement of the market.
+
+```{r}
+# partial dependence plots
+par(mfrow = c(2,2))
+partialPlot(mod_rf, pred.data = test_data, x.var = "stock") 
+partialPlot(mod_rf, pred.data = test_data, x.var = "rate") 
+partialPlot(mod_rf, pred.data = test_data, x.var = "stocks")
+partialPlot(mod_rf, pred.data = test_data, x.var = "new")
+op <- par(no.readonly = TRUE)
+```
+
+
+# Real Life Application and Costs
+
+Both businesses and the financial industry move with the news. Any amount of news, big or small, positive or negative, may have a compounded effect on a firm's business and its stock price and may even affect the overall economy as a whole. Obtaining market news have hence been seen as essential for the future of the companies, with many companies spending money to purchase news analysis reports in order to understand the state of the economy, in relation to their sector or specifically to the company itself. This part of the report will be spent discussing the actual cost of collecting, storing and analyzing news articles on their impact on the markets.
+
+Firstly, data collection. The easiest way to collect news data from all over the web would be to hire a web scraper or utilize a web scraping service. Services typically charge around 50 dollars per month per site and 5 dollars per 10,000 records. This may seem relatively reasonable, but as the number of sites we want to scrape from increase , this cost will increase quite substantially. The United States itself already has more than 100 news sites. Assuming that we want to scrape from the top 10 news sites every month, we will be paying at least $500 on data collection per month.
+
+Next comes the question of data storage. Assuming the data collected is largely textual data, which will definitely reduce on storage as compared to pictorial or audio data, and looking at 10TB of storage space, storage providers typically charge around 30 dollars per user per month.
+
+Lastly, for data analysis. Firstly, companies will require servers or utilize cloud computing platforms as Amazon Web Services to ensure sufficient computational power for its analysis. Small servers cost around 6500 dollars which includes both the hardware and installation. Additionally, data scientists will need to be hired to conduct the analysis itself. The average salary for a data scientist in Singapore around 6000 dollars per month. We will estimate that 2 data scientists will be required for a small company. 
+
+Overall, an estimate of the cost of market news analysis will be 13000 dollars per month, in addition to an inital 6500 dollars for installation of servers. This may pose considerable cost to smaller companies and they and hence companies shuould weigh the benefits of the analysis to their bottom line specifically, before coming to a conclusion on whether this expense is required.
+
+# Conclusion
+
+To conclude, in this project, we utilised seven models (two deep and two non-deep) to predict the movement of US stock market in response to economic news reports. Even though none of the models succeeded in this endeavor (in comparison with the naive baseline model), we did identify the five important words in determining the movement of the market.
+
+Also worth mentioning are some possible reasons for the low accuracy. The first one to note is the time mismatch in the market's response to the news reports, because we have no information concerning exactly what time the news came out — it maybe before the market opened or after the market closed. Also, as some scholars have pointed out, news reports are written in a special way that current models are not capable of correctly identifying. Lastly, the economic impact of any single piece of news can be highly complex: for instance, a decrease in long-term T-bonds’ yield may be a good sign, but if it went too low such that we face an inverted yield curve, then there is a problem.
+
+Finally, we presented a thorough analysis on the real life applications and costs, which suggests the need for caution for small businesses before diving into news mining.
+
+# References
+
+1. https://data.world/crowdflower/economic-news-article-tone
+
+2. https://www.techradar.com/sg/news/the-best-cloud-storage#best-business-cloud-storage
+
+3. https://www.quora.com/How-much-does-it-cost-to-hire-a-web-scraper
+
+4. https://www.serverpronto.com/spu/2019/04/how-much-does-a-server-cost-for-a-small-business/
+
+5. https://www.glassdoor.sg/Salaries/singapore-data-scientist-salary-SRCH_IL.0,9_IM1123_KO10,24.htm?countryRedirect=true

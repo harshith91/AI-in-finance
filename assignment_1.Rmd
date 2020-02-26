@@ -1,0 +1,600 @@
+---
+title: "Assignment 1"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+# Info about the activity
+
+This is Assignment 1 on non-deep AI models. It covers material from weeks 1-2 of the mini-term. This assignment is individual and all the work that you submit is supposed to be your own. You can use information found online, but all sources must be properly cited.
+
+The marking scheme for assignment 1 is available here:
+
+https://docs.google.com/spreadsheets/d/1d6NPRpvL7FWeB_xHDO4_421GlyPTXfjruDPT0Z6jOC8/edit?usp=sharing
+
+This assignment contains the main part (75%) and the open-ended part (25%). Doing just the main part, you can get a B and completing both parts, you can get an A.
+
+Deadline for this assignment is 20 Jan, 6:30 pm
+
+## Data
+
+The dataset for assignment 1 is a collection of Donald Trump's tweets. 
+
+Source: http://www.trumptwitterarchive.com/
+
+
+```{r}
+# Please load libraries here
+library(ggplot2)  # plotting
+library(caret)  # confusion matrix and cross-validation
+library(randomForest)  # decision tree fitting
+library(tm)  # text processing
+library(wordcloud) # text visualization
+library(reshape2)  # data manipulation, in particular, melt
+
+
+nt<-t <- read.csv("C:\\Users\\1987h\\Downloads\\NTU MFE study material\\mini term 4\\AI\\leco2\\assignment 1\\trump_twitter.csv", stringsAsFactors = FALSE)
+#head(t)
+```
+
+## Objectives
+
+You need to train 3 models that we learned in class, namely, linear or logistic regression, decision tree and random forest to predict the retweet count from the text of a tweet. You need to knit your Rmd file into a PDF and submit the PDF to NTULearn. Your report should include R codes (don't hide them).
+
+Your report is supposed to contain the following parts:
+
+1. Exploratory data analysis (just one plot and a couple of sentences with your analysis of what is on the plot)
+
+2. Feature engineering where you identify predictors and response variable. This includes data preprosessing because you need to clean your data to create features. However, it you feel that data preprocessing should be done before exploratory data analysis, you can do it that way.
+
+3. Modelling where you train 3 models that predict the retweet count, take care of potential overfitting, and compare the results of the 3 models. You will also need to intepret the models, whenever possible.
+
+4. Non-math part where you suggest how twitter data can be used in business and evaluate the cost of collecting the data.
+
+5. (Optional open-ended part for an A) Evaluate whether Donald Trump's twitter has any effect on stock market. A part of the challenge here is finding relevant stock market data and merging it with Trump's twitter data.
+
+Note that you will also be evaluated on the quality of your report and on the quality of your coding.
+
+
+```{r}
+dim(t)
+```
+
+```{r}
+summary(t["retweet_count"])
+
+```
+We are only gonna take rows where the numberof retweets is greater than 100
+
+```{r}
+
+t <- t[t$retweet_count > 100, -1]
+
+
+dim(t)
+```
+```{r}
+#head(t)
+
+```
+
+# Stripping the created_at column to only keep the years
+
+```{r}
+t$created_at <- substring(t$created_at, 7, 10)
+#tail(t)
+
+```
+```{r}
+table(t$created_at)
+
+```
+
+# Exploratory data analysis.
+
+Produce one plot and give your analysis of that plot here.
+
+#Plot of Trump's number of tweets over the years with more than 100 retweets...
+
+```{r}
+d<-as.data.frame(table(t$created_at))
+
+ggplot(data = d,
+     aes(x = Var1,
+         y = Freq))+
+  geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 45)) +
+  xlab('Year') + ylab('Number of Tweets')
+```
+
+# 2019 was the year president tweeted the most with 3835(more than 100 retweets) tweets
+
+
+# Feature engineering
+
+Identify the response variable and the predictors here.
+
+
+We will change all characters to lower case and remove all characters except for alphabet. 
+```{r}
+t$clean_text <- tolower(t$text)
+t$clean_text <- gsub('[^a-z]', " ", t$clean_text)
+
+sample(t$clean_text, 1)
+```
+
+
+# We will remove the stop words from the texts
+# But first we will show the wordcloud of the trump tweets to see what words come up quite frequently in  his tweets.
+
+
+```{r}
+stopwords()
+
+visual <- function(x)
+{
+  freqs <- termFreq(x)
+  freqs <- freqs[!(names(freqs) %in% c("twitter","https", "iphone", "realdonaldtrump", "amp", "android", stopwords()))] 
+  wordcloud(words = names(freqs),
+            freq = freqs,
+            min.freq = 0,
+            max.words = 50, random.order=FALSE, rot.per=0.35, 
+            colors=brewer.pal(8, "Dark2"))
+}
+
+visual(t$clean_text)
+
+```
+# Now we have an idea of the word that occur in his tweets. Got to remove "twitter", "https", "amp", "y", "http"
+
+
+```{r}
+tf <- termFreq(t$clean_text)
+tf <- tf[!(names(tf) %in% c("twitter", "https", "amp", "y", "http" , stopwords()))]
+tf <- tf[tf>=200] # keep words with frequency higher than 200
+
+##Document term matrix
+
+corpus <- VCorpus(VectorSource(t$clean_text))
+DTM <- DocumentTermMatrix(corpus)
+
+DTM <- DTM[ , DTM$dimnames$Terms %in% names(tf)]
+
+colnames(DTM)[colnames(DTM) == 'next'] <- 'NEXT'
+colnames(DTM)[colnames(DTM) == 'else'] <- 'ELSE'
+
+#as.data.frame(as.matrix(DTM))
+
+
+```
+
+
+
+
+
+
+# Modelling 
+
+Construct 3 models to predict the retweet count from the text of a tweet, evaluate and compare their accuracy and analyse interpretability.
+
+
+```{r}
+
+data <- cbind(as.data.frame(as.matrix(DTM)),
+              t$retweet_count)
+
+names(data)[ncol(data)] <- "y"
+```
+
+
+# splitting the data into training (70%) and test.
+
+```{r}
+
+
+ix <- runif(nrow(data)) < 0.7
+train_data <- na.omit(data[ix , ])
+test_data <- na.omit(data[!ix , ])
+
+cat("Dimensions of training data are", dim(train_data), "\n")
+cat("Dimensions of test data are", dim(test_data), "\n")
+
+```
+
+# Model-1 Linear Regression
+
+
+```{r}
+mod_1 <- lm(y ~.,
+            data = train_data,
+            na.action = na.omit)
+
+#calculating the mean absolute error of the linear model on the test set
+
+mean_abs_error <- function(predicted_values, actual_values) {
+  mean(abs(predicted_values - actual_values))
+}
+
+mas_lm <-mean_abs_error(predict(mod_1, test_data[ , -ncol(test_data)]), test_data[ , ncol(test_data)])
+print(paste("Mean absolute error from linear regression: ", mas_lm))
+```
+
+
+
+
+# Model 2 - DECISION TREES
+
+```{r}
+library(rpart)  # decision tree fitting
+library(rpart.plot)  # decision tree plotting
+
+mod_2 <- rpart(y ~ . , 
+               data = train_data,
+               method = "anova",
+               na.action = na.omit)
+
+saveRDS(mod_2, "tree_rf.rds")
+rpart.plot(mod_2)
+```
+```{r}
+pdtree<- prune(mod_2, cp=mod_2$cptable[which.min(mod_2$cptable[,"xerror"]),"CP"])
+plot(pdtree, uniform=TRUE,
+     main="Pruned  Tree")
+text(pdtree, use.n=TRUE, all=TRUE, cex=.8)
+```
+
+
+```{r}
+summary(mod_2)
+```
+# Conclusion - "democrats" is the most important factor in determining the number of retweets. Followed by "fake", "border"  and "united"
+
+
+```{r}
+printcp(mod_2)
+```
+
+
+
+```{r}
+
+# mean absolute error
+
+mse <- mean_abs_error(predict(mod_2, test_data[ , -ncol(test_data)]), test_data[ , ncol(test_data)])
+print(paste("Mean absolute error for Decision trees is: ", mse))
+```
+
+# Decision tree based regression model has given smaller mean absolute error than simple linear regression.
+
+
+
+
+
+# Model-3 Random Forests
+
+
+```{r}
+
+
+mod_3 <- randomForest(y ~ .,
+                      data = train_data,
+                      xtest = test_data[ , -ncol(test_data)],
+                      ytest = test_data[ , ncol(test_data)],
+                      keep.forest = TRUE,
+                      ntree = 50,
+                      mtry = 16,
+                      na.action = na.omit)
+
+
+```
+
+
+```{r}
+print(paste("Mean absolute error for randomForest : ", mean_abs_error(predict(mod_3, test_data[ , -ncol(test_data)]), test_data[ , ncol(test_data)])))
+```
+
+# Now we take a look at variable importance for different variables in random forest
+
+```{r}
+var_importance <- mod_3$importance
+head(var_importance)
+
+```
+
+# Cross validation for random forest
+
+```{r}
+control <- trainControl(method="cv", number = 5)
+tunegrid <- expand.grid(mtry = c(5, 10, 16, 25))
+
+rf_gridsearch <- train(y ~ . , data = na.omit(train_data), 
+                       method = "rf", 
+                       tuneGrid = tunegrid, 
+                       trControl = control,
+                       ntree = 50)
+
+print(rf_gridsearch)
+plot(rf_gridsearch)
+```
+
+```{r}
+rf_gridsearch$finalModel
+```
+
+# From this we conclude that the best model is the one with 16 variables tried for splitting
+
+# FINAL CONCLUSION - Our Random forest model gives the least mean absolute error(6595.016) compare to Decision trees(8251.151)
+# and Linear regression(8586.69) .so it is the best model out of all 3 model.
+
+
+
+# Non-math part
+
+Suggest a way how twitter data such as Donald Trump's twitter can be used to solve a real business or finance problem. Evaluate the cost of collecting the data for a real purpose.
+
+# ANSWER-
+
+Twitter data can provide insights on how one can advertise to the audience better. Tweets are the conversations between users on that company's products. One application could be analyzing how the company is received in the public. This can be done by collecting tweets that mention the name of the company and run sentiment analysis over it.
+
+We can also target users that specifically live in a certain location or we can map the areas on the globe where the company or the product has been mentioned the most
+
+
+
+
+# Optional open-ended part
+
+Does Donald Trump's twitter has any effect on movement of stock markets? In order to answer this question, you will need to find stock market data, merge it with Trump's twitter, train some machine learning models and interpret the findings.
+
+
+# Loading relevant libraries and getting SnP data
+```{r}
+library(tseries)
+library(forecast)
+library(urca)
+library(quantmod)
+library(ggfortify)
+library(ggplot2)
+library(xts)
+
+
+
+getSymbols("^GSPC", from="2016-05-05", to="2019-12-31", src="yahoo", periodicity="daily")
+
+snp = na.omit(diff(log(GSPC$GSPC.Adjusted)))
+
+
+## calculating the rolling standard deviation of daily stock returns . Using it as a measure of volatility
+
+snp = na.omit(rollapply(snp, width = 6,
+                        sd))
+
+#head(snp)
+```
+
+# We have got 6 day rolling standard deviation of our daily SNP returns. 
+
+# WE ARE GONNA TRY TO WAYS OF PREDICING THE MARKET VOLATILITY
+#  1) First we are gonna use "retweet count" and "favorite count" to predict the volatility. We will try linear regression, decision trees and random forests for this
+
+#  2) Second we are gonna use words from the tweets to predict volatility. We will only fit random forests in this case(gives better results)
+
+
+
+
+
+# Basically we are trying to see the effect of popular (popularity measured by "number of retweets" and "Favorites count") trump tweets
+# on the volatility(standard deviation) of SnP 500 daily returns.
+ 
+#1) TO SEE IF POPULAR TRUMP TWEETS AFFECT THE VOLATILTY OF THE MARKET 
+
+
+
+```{r}
+#nt <- read.csv("trump_twitter.csv", stringsAsFactors = FALSE)
+
+# strip the created_at column to keep only the date part
+nt$created_at <- as.Date(substring(nt$created_at, 1, 10), format = "%m-%d-%Y")
+#nt
+
+```
+
+
+# We will seperate trumps tweets by day keeping only the ones that were retweeted the most
+```{r}
+library(tidyverse)
+library(dplyr)
+new <- nt %>% group_by(created_at)%>%
+  summarise(max_retweet = max(retweet_count))
+  
+#head(new)
+```
+
+
+
+
+
+# Further cleaning of the dataframe
+
+```{r}
+new$created_at <- as.Date(new$created_at, format = "%m-%d-%Y")
+
+new <- new[order(new$created_at), ] # here we order trump tweets from the beigninnig of the period to the most recent
+
+
+
+#here we create a new dataframe keeping only the day the market data 
+#was recorded, calling it "created_at" for simplicity, and the standard deviation of that day
+c<-index(snp)
+sd <- c(snp$GSPC.Adjusted)
+colnames(sd) <- "price_deviation" 
+snpn <- data.frame("created_at" = c, "price_deviation" = sd) 
+
+#head(snpn)
+```
+
+
+
+
+
+
+# finally we will merge the two dataframes, stock price data + trump's tweet data, into our final data
+
+```{r}
+final = merge(new, snpn, by.x = "created_at", by.y = "created_at")
+
+temp <- nt %>% group_by(created_at)%>%
+  summarise(favorite_count = max(favorite_count)) #keeping the maximum of "favorite_count" for each day.
+
+final = merge(final, temp, by.x = "created_at", by.y = "created_at")
+#tail(final)
+```
+
+
+```{r}
+
+# we transform the data type of favorite count from factor to numeric
+final <- transform(final,
+                   favorite_count = as.numeric(favorite_count))
+
+sapply(final, class)
+```
+
+
+# Now we will fit the linear regression moodel
+
+```{r}
+ii <- runif(nrow(final)) < 0.7
+
+train_d <- final[ii, ]
+test_d <- final[!ii, ]
+
+
+# here i have used linear regression as my model to predict the "standard deviation for snp" based on ""
+mod_4 <- lm(price_deviation ~ max_retweet + favorite_count,
+            data = train_d)
+
+summary(mod_4)
+```
+
+# we see that for linear regression the coeffecients are statistically insginificant
+```{r}
+test_df <- data.frame(test_d[ , c(2,4)])
+mn_ab_per_er <- mean(abs(predict(mod_4, test_df) - test_d[ , 3])/test_d[ , 3])*100
+print(paste("The mean absolute percentage error: ", mn_ab_per_er))
+```
+
+
+
+# Now we try regression trees.
+```{r}
+mod_dt <- rpart(price_deviation ~ max_retweet + favorite_count,
+                         data = train_d,)
+```
+
+```{r}
+mape_dt <- mean(abs(predict(mod_dt, test_d) - test_d[ , "price_deviation"])/test_d[ , "price_deviation"])*100
+
+print(paste("Mean absolute percentage error for decision trees : ", mape_dt, " %"))
+```
+
+
+
+# We try another model. this time random forest.
+
+```{r}
+mod_5_rf <- randomForest(price_deviation ~ max_retweet + favorite_count,
+                         data = train_d,
+                         xtest = test_d[ , c("max_retweet", "favorite_count")],
+                         ytest = test_d[ , "price_deviation"],
+                         keep.forest = TRUE,
+                         ntree = 500,
+                         mtry = 2)
+
+mod_5_rf
+```
+# Here we get negative R2. it means we were better off simply predicting the mean of the data every time.
+```{r}
+mape_rf1 <- mean(abs(predict(mod_5_rf, test_d) - test_d[ , "price_deviation"])/test_d[ , "price_deviation"])*100
+print(paste("Mean absolute percentage error for decision tree : ", mape_rf1, " %"))
+```
+#nquite bad MAPE as expected
+
+
+
+
+# 2) Now we try another approach where we use the word's from tweets to predict the volatility of the market.
+
+```{r}
+
+# only taking rows with retweet count more than 100
+data_new <- cbind( nt[nt$retweet_count>100, "created_at"], as.data.frame(as.matrix(DTM)))
+colnames(data_new)[1]<-"created_at"
+
+#head(data_new)
+```
+
+```{r}
+# ordering the data from beginninf to most recent
+data_new$created_at <- as.Date(data_new$created_at, format = "%m-%d-%Y")
+
+data_new <- data_new[order(data_new$created_at), ]
+```
+
+
+```{r}
+
+#merging the snp standard deviation data and the words from the tweets
+final_2 = merge(data_new, snpn, by.x = "created_at", by.y = "created_at")
+
+final_22 <- final_2[ , -1]# did this to remove the "created_at" column. 
+
+#head(final_22)
+```
+```{r}
+#creating the test and train data
+ii <- runif(nrow(final_22)) < 0.7
+
+train_d2 <- final_22[ii, ]
+test_d2 <- final_22[!ii, ]
+
+```
+# now we will apply randomforest for this regession exercise
+
+```{r}
+control2 <- trainControl(method="cv", number = 5)
+tunegrid2 <- expand.grid(mtry = c(5, 10, 16, 25))
+
+rf_gridsearch2 <- train(price_deviation  ~ . , data = na.omit(train_d2), 
+                       method = "rf", 
+                       tuneGrid = tunegrid2, 
+                       trControl = control2,
+                       ntree = 50)
+
+print(rf_gridsearch2)
+plot(rf_gridsearch2)
+```
+```{r}
+rf_gridsearch2$finalModel
+```
+
+
+
+```{r}
+mod_rf2 <- randomForest(price_deviation  ~ .,
+                        data = train_d2,
+                        xtest = test_d2[ , -ncol(test_d2)],
+                        ytest = test_d2[ , ncol(test_d2)],
+                        keep.forest = TRUE,
+                        ntree = 50,
+                        mtry = 10)
+```
+
+
+```{r}
+mape_rf2 <- mean(abs(predict(mod_rf2, test_d2) - test_d2[ , "price_deviation"])/test_d2[ , "price_deviation"])*100
+print(paste("Mean absolute percentage error for the 2nd decision tree is: ",mape_rf2," % "))
+```
+
+# In this 2nd decision tree we get a better MAPE. So our decision tree model where we use words from the tweets to predict market volatility is better of all the models and in general is a better approach than just relying on number of retweets and favorites count
