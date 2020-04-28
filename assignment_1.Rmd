@@ -7,21 +7,11 @@ output:
     df_print: paged
 ---
 
-# Info about the activity
 
-This is Assignment 1 on non-deep AI models. It covers material from weeks 1-2 of the mini-term. This assignment is individual and all the work that you submit is supposed to be your own. You can use information found online, but all sources must be properly cited.
-
-The marking scheme for assignment 1 is available here:
-
-https://docs.google.com/spreadsheets/d/1d6NPRpvL7FWeB_xHDO4_421GlyPTXfjruDPT0Z6jOC8/edit?usp=sharing
-
-This assignment contains the main part (75%) and the open-ended part (25%). Doing just the main part, you can get a B and completing both parts, you can get an A.
-
-Deadline for this assignment is 20 Jan, 6:30 pm
 
 ## Data
 
-The dataset for assignment 1 is a collection of Donald Trump's tweets. 
+The dataset this project is a collection of Donald Trump's tweets. 
 
 Source: http://www.trumptwitterarchive.com/
 
